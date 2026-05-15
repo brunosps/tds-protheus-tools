@@ -1,0 +1,4 @@
+interface:
+  display_name: "TDS Protheus Tools"
+  short_description: "Quality gate, compile, patch, and inspect Protheus fontes."
+  default_prompt: "Use $tds-protheus-tools to run the Protheus quality gate, compile fontes, generate PTM patches, or inspect RPO/patch contents with TDS-Cli."

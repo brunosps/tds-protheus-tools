@@ -1,0 +1,18 @@
+{
+  "name": "tds-protheus-tools-skill",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Codex skill for TOTVS Protheus quality gate, TDS-Cli compile, patch, and RPO inspection workflows.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/brunosps/tds-protheus-tools.git"
+  },
+  "scripts": {
+    "tds": "node scripts/tds_protheus.mjs",
+    "validate:syntax": "node --check scripts/tds_protheus.mjs"
+  },
+  "dependencies": {
+    "@totvs/tds-ls": "latest",
+    "vscode-jsonrpc": "latest"
+  }
+}
