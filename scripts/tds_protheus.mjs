@@ -16,6 +16,7 @@ const ACTIONS = new Set([
   'rpo-objects',
   'rpo-functions',
   'rpo-check',
+  'decompress-ch',
 ]);
 
 const BOOL_KEYS = new Set(['secure', 'includeOutScope', 'recompile', 'keepLog']);
@@ -55,6 +56,12 @@ const KEY_ALIASES = new Map([
   ['advpls-path', 'advplsPath'],
   ['keeplog', 'keepLog'],
   ['keep-log', 'keepLog'],
+  ['origin', 'origin'],
+  ['source', 'origin'],
+  ['input', 'origin'],
+  ['dest', 'dest'],
+  ['destination', 'dest'],
+  ['target', 'dest'],
   ['help', 'help'],
   ['h', 'help'],
 ]);
@@ -65,6 +72,7 @@ function usage() {
   node scripts/tds_protheus.mjs --action quality --programs src/A.prw,src/B.tlpp
   node scripts/tds_protheus.mjs --action patch-gen --file-resources A.PRW --patch-name A_YYYYMMDD --save-local ./patches
   node scripts/tds_protheus.mjs --action rpo-check --file-resources A.PRW
+  node scripts/tds_protheus.mjs --action decompress-ch --source /path/compressed --dest /path/out
 
 Options accept --kebab-case, --camelCase, or PowerShell-style -PascalCase names.`;
 }
@@ -126,6 +134,8 @@ function parseArgs(argv) {
     recompile: false,
     advplsPath: '',
     keepLog: false,
+    origin: '',
+    dest: '',
     help: false,
   };
 
@@ -736,6 +746,25 @@ function invokeLspAction(options, advpls) {
   }
 }
 
+function runDecompressCh(options) {
+  if (!options.origin) throw new Error('Origin is required for decompress-ch (use --source).');
+  if (!options.dest) throw new Error('Dest is required for decompress-ch (use --dest).');
+  if (!fs.existsSync(options.origin)) throw new Error(`Origin folder not found: ${options.origin}`);
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const script = path.join(scriptDir, 'decompress_ch.py');
+  const pythonBin = findPython();
+  const result = childProcess.spawnSync(pythonBin, [script, options.origin, options.dest], { stdio: 'inherit' });
+  process.exit(result.status === null ? 1 : result.status);
+}
+
+function findPython() {
+  for (const bin of ['python3', 'python']) {
+    const probe = childProcess.spawnSync(bin, ['--version'], { stdio: 'ignore' });
+    if (probe.status === 0) return bin;
+  }
+  throw new Error('Python 3 not found on PATH (required for decompress-ch).');
+}
+
 function runAppre(options, advpls) {
   if (options.programs.length === 0) throw new Error('Programs is required for appre.');
   const args = ['appre'];
@@ -759,6 +788,11 @@ function main() {
     if (options.programs.length === 0) throw new Error('Programs is required for quality.');
     assertAdvplCompileRules(options.programs);
     console.log('[INFO] Quality gate passed.');
+    return;
+  }
+
+  if (options.action === 'decompress-ch') {
+    runDecompressCh(options);
     return;
   }
 

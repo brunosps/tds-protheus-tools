@@ -26,6 +26,7 @@ Use this skill for Protheus quality validation, build, patch, and RPO inspection
 - Node.js 18+ available as `node`.
 - `npm` available if the skill must auto-install `@totvs/tds-ls` or `vscode-jsonrpc`.
 - `advpls` for compile, patch, appre, and RPO actions. The `quality` action does not require `advpls`, AppServer, credentials, or network access.
+- `python3` (or `python`) for the `decompress-ch` action; it does not require `advpls`, AppServer, credentials, or network access.
 - On Linux, set `TDS_INCLUDES` or pass `--includes` when includes are not in `/opt/totvs/includes`.
 
 The CLI resolves `advpls` in this order:
@@ -97,6 +98,15 @@ node .codex/skills/tds-protheus-tools/scripts/tds_protheus.mjs \
   --file-resources MECOPYCLI.PRW,MA030ROT.PRW
 ```
 
+Decompress TOTVS `.ch`/`.th` includes (raw zlib). The action streams raw bytes, so the original Windows-1252 (cp1252) encoding of each include is preserved verbatim — no decode/re-encode happens:
+
+```bash
+node .codex/skills/tds-protheus-tools/scripts/tds_protheus.mjs \
+  --action decompress-ch \
+  --source /path/to/compressed/includes \
+  --dest /opt/totvs/includes
+```
+
 Windows compatibility form:
 
 ```powershell
@@ -162,6 +172,7 @@ tds-protheus-tools/
   scripts/tds_protheus.mjs
   scripts/tds_lsp_client.js
   scripts/tds_protheus.ps1
+  scripts/decompress_ch.py
 ```
 
 Install from GitHub with:
