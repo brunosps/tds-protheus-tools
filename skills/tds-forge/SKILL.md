@@ -229,27 +229,29 @@ tds-protheus-tools/                  # collection repository
   skills/tds-codex/ ...              # sibling knowledge/generation skills
 ```
 
-Install from GitHub with:
+Install with the `skills` CLI (pulls from the repository's default branch on GitHub):
 
 ```bash
-npx --yes skills add brunosps/tds-protheus-tools
-```
+# whole collection, global, all skills
+npx --yes skills add brunosps/tds-protheus-tools -g --skill '*' -y
 
-If the repository contains multiple skills or the installer needs an explicit skill name:
+# just this skill
+npx --yes skills add brunosps/tds-protheus-tools -g --skill tds-forge -y
 
-```bash
-npx --yes skills add brunosps/tds-protheus-tools --skill tds-protheus-tools
+# list what the repo offers, without installing
+npx --yes skills add brunosps/tds-protheus-tools --list
 ```
 
 Do not commit `node_modules` or `package-lock.json`; the CLI installs runtime dependencies locally when needed.
 
-For local development after cloning:
+For local development after cloning (install from the local path, validate):
 
 ```bash
 git clone https://github.com/brunosps/tds-protheus-tools.git
 cd tds-protheus-tools
-npm run validate:syntax
-python ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
+npm --prefix skills/tds-forge run validate:syntax
+npx --yes skills add . --list                 # confirm all 7 skills are discovered
+npx --yes skills add . -g --skill '*' -y       # install the collection locally
 ```
 
 ## Workflow
