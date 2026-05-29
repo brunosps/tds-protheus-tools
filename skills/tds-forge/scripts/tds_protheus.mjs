@@ -17,9 +17,10 @@ const ACTIONS = new Set([
   'rpo-functions',
   'rpo-check',
   'decompress-ch',
+  'convert-encoding',
 ]);
 
-const BOOL_KEYS = new Set(['secure', 'includeOutScope', 'recompile', 'keepLog']);
+const BOOL_KEYS = new Set(['secure', 'includeOutScope', 'recompile', 'keepLog', 'recursive', 'dryRun', 'gateWarnOnly']);
 const ARRAY_KEYS = new Set(['includes', 'programs', 'fileResources']);
 
 const KEY_ALIASES = new Map([
@@ -62,6 +63,16 @@ const KEY_ALIASES = new Map([
   ['dest', 'dest'],
   ['destination', 'dest'],
   ['target', 'dest'],
+  ['to', 'to'],
+  ['recursive', 'recursive'],
+  ['r', 'recursive'],
+  ['dry-run', 'dryRun'],
+  ['dryrun', 'dryRun'],
+  ['extensions', 'extensions'],
+  ['ext', 'extensions'],
+  ['gate-warn-only', 'gateWarnOnly'],
+  ['warn-only', 'gateWarnOnly'],
+  ['warnonly', 'gateWarnOnly'],
   ['help', 'help'],
   ['h', 'help'],
 ]);
@@ -70,9 +81,11 @@ function usage() {
   return `Usage:
   node scripts/tds_protheus.mjs --action compile --programs src/A.prw --recompile
   node scripts/tds_protheus.mjs --action quality --programs src/A.prw,src/B.tlpp
+  node scripts/tds_protheus.mjs --action compile --programs src/Legacy.prw --gate-warn-only
   node scripts/tds_protheus.mjs --action patch-gen --file-resources A.PRW --patch-name A_YYYYMMDD --save-local ./patches
   node scripts/tds_protheus.mjs --action rpo-check --file-resources A.PRW
   node scripts/tds_protheus.mjs --action decompress-ch --source /path/compressed --dest /path/out
+  node scripts/tds_protheus.mjs --action convert-encoding --source ./src --to cp1252 --recursive --dry-run
 
 Options accept --kebab-case, --camelCase, or PowerShell-style -PascalCase names.`;
 }
@@ -136,6 +149,11 @@ function parseArgs(argv) {
     keepLog: false,
     origin: '',
     dest: '',
+    to: 'cp1252',
+    recursive: false,
+    dryRun: false,
+    extensions: '',
+    gateWarnOnly: false,
     help: false,
   };
 
@@ -371,7 +389,20 @@ function tenantContextError(filePath, lineNumber, variable, operation) {
   return `${filePath}:${lineNumber} - Protheus 12.1.2510 quality gate blocks ${operation} of ${variable}. Read access is allowed, but tenant/user context must be prepared by the supported runtime path: RpcSetEnv() only at the start of a new StartJob/SmartJob thread, REST PrepareIn with tenantId, SOAP specialist URI/PrepareIn, or xFilial()/FWxFilial() for branch filters.`;
 }
 
-function assertAdvplCompileRules(sourcePrograms) {
+// Tags a finding with its SonarQube (engpro.totvs) rule id, e.g. "<file>:<line> - [CA2050] ...".
+function ruleTag(filePath, lineNumber, id, message) {
+  return `${filePath}:${lineNumber} - [${id}] ${message}`;
+}
+
+// Maps a Protheus system table to its G4 SonarQube rule id (direct DbSelectArea access prohibited).
+const SYS_TABLE_RULE = new Map([
+  ['SM0', 'CA2000'], ['SIX', 'CA2001'], ['SX1', 'CA2002'], ['SX2', 'CA2003'],
+  ['SX3', 'CA2004'], ['SX7', 'CA2005'], ['SX9', 'CA2006'], ['SXA', 'CA2007'],
+  ['SXB', 'CA2008'], ['SX5', 'CA2009'], ['SX6', 'CA2010'], ['SXG', 'CA2011'],
+  ['SXD', 'CA2012'],
+]);
+
+function assertAdvplCompileRules(sourcePrograms, { warnOnly = false } = {}) {
   const errors = [];
   const warnings = [];
 
@@ -385,6 +416,12 @@ function assertAdvplCompileRules(sourcePrograms) {
     const boundaries = [];
     const includeLines = new Map();
     let transactionDepth = 0;
+    // SonarQube AdvPL/TLPP catalog (sonar-rules.engpro.totvs.com.br): security blocks, legacy/quality warns.
+    let loopDepth = 0;
+    const fullText = lines.join('\n');
+    const isRestSoap = /@\s*(Get|Post|Put|Delete|Patch)\b|\bWSRESTFUL\b|\bWSMETHOD\b|\bWSSERVICE\b|\bWSDLPATH\b/i.test(fullText);
+    const fileFlags = { iif: 0, iifLine: 0, incCase: 0, incLine: 0, ini: 0, iniLine: 0 };
+    let firstSqlLine = 0;
 
     for (let i = 0; i < lines.length; i += 1) {
       const codeLine = advplCodeLine(lines[i]);
@@ -400,6 +437,67 @@ function assertAdvplCompileRules(sourcePrograms) {
       if (tenantByRef) {
         errors.push(tenantContextError(resolved, i + 1, tenantByRef[1], 'by-reference mutation risk'));
       }
+
+      // --- SonarQube G1 security (BLOCKS, .prw + .tlpp). Use --gate-warn-only to downgrade for legacy compiles. ---
+      if (/\bStaticCall\s*\(/i.test(codeLine)) {
+        errors.push(ruleTag(resolved, i + 1, 'CA2022', 'Restricted function StaticCall(); replace with FWLoadModel()/FWLoadMenuDef() or a direct namespace call.'));
+      }
+      if (/\bPTInternal\s*\(/i.test(codeLine)) {
+        errors.push(ruleTag(resolved, i + 1, 'CA2023', 'Prohibited function PTInternal(); remove it (no exceptions).'));
+      }
+      if (/\bCREATE\s+PROCEDURE\b/i.test(codeLine)) {
+        errors.push(ruleTag(resolved, i + 1, 'CA2053', 'CREATE PROCEDURE in source is prohibited; manage procedures via SPManager.'));
+      }
+      const credMatch = /\b([A-Za-z_][A-Za-z0-9_]*(?:senha|pass|pwd|secret|token|apikey)[A-Za-z0-9_]*)\s*:=\s*(["'])([^"']+)\2/i.exec(codeLine);
+      if (credMatch && !/^(?:https?:|www\.|\/|\.)/i.test(credMatch[3]) && !/\.(?:com|br|net|org)\b/i.test(credMatch[3])) {
+        errors.push(ruleTag(resolved, i + 1, 'CA2052', `Hardcoded credential in ${credMatch[1]}; read it from GetMV() or AppServer config, never a string literal.`));
+      }
+      // Flags a bare variable concatenated into a SQL value (the "= '" + cVar + "'" pattern).
+      // Function calls (xFilial(), RetSqlName(), FWxFilial(), AllTrim(), ...) are excluded via (?!\s*\() — they are safe framework helpers, not injectable input.
+      const concatSql = /(?:'"\s*\+\s*[A-Za-z_]\w*\b(?!\s*\())|(?:\+\s*[A-Za-z_]\w*\b(?!\s*\()\s*\+\s*"\s*')/.test(codeLine);
+      if (concatSql) {
+        errors.push(ruleTag(resolved, i + 1, 'CA2050', 'Possible SQL injection: a value is concatenated into a SQL string; use FWExecStatement() with bind parameters (?).'));
+      }
+      if (isRestSoap && /\b(RpcSetEnv|RpcSetType)\s*\(/i.test(codeLine)) {
+        const fn = /\bRpcSetType\b/i.test(codeLine) ? 'RpcSetType' : 'RpcSetEnv';
+        errors.push(ruleTag(resolved, i + 1, 'BG1000', `${fn}() inside a REST/SOAP service is prohibited; configure PrepareIn (REST) or specialist URI/PrepareIn (SOAP) and use the tenantId header.`));
+      }
+
+      // --- SonarQube G2/G3/G4 legacy/quality (WARNS, .prw + .tlpp). ---
+      if (/^\s*(For|While|Do\s+While)\b/i.test(codeLine)) loopDepth += 1;
+      if (/^\s*(Next|EndDo|End\s+Do)\b/i.test(codeLine) && loopDepth > 0) loopDepth -= 1;
+
+      if (/\b(ConOut|OutErr)\s*\(/i.test(codeLine) || /^\s*\?\s/.test(codeLine)) {
+        warnings.push(ruleTag(resolved, i + 1, 'CA1004', 'Console output (ConOut/OutErr/?) is prohibited; use FWLogMsg().'));
+      }
+      if (/\b(MSCREATE|DBCREATE|CRIATRAB)\s*\(/i.test(codeLine)) {
+        warnings.push(ruleTag(resolved, i + 1, 'CA1000', 'ISAM driver access (MSCREATE/DBCREATE/CRIATRAB); use FWTemporaryTable in relational mode.'));
+      }
+      const loopApi = loopDepth > 0 ? /\b(GetMV|SuperGetMV|ExistBlock|AllUsers|Pergunte|Type)\s*\(/i.exec(codeLine) : null;
+      if (loopApi) {
+        warnings.push(ruleTag(resolved, i + 1, 'CA1003', `${loopApi[1]}() called inside a loop; cache the result before the loop.`));
+      }
+      const sysTable = /\bDb(?:SelectArea|UseArea)\s*\(\s*["'](S(?:X[0-9A-Z]?|M0|IX))["']/i.exec(codeLine);
+      if (sysTable) {
+        const tbl = sysTable[1].toUpperCase();
+        const id = SYS_TABLE_RULE.get(tbl) || SYS_TABLE_RULE.get(tbl.slice(0, 3)) || 'CA2013';
+        warnings.push(ruleTag(resolved, i + 1, id, `Direct access to system table ${tbl} via DbSelectArea/DbUseArea; use the framework API instead.`));
+      }
+      if (/\bRecLock\s*\(/i.test(codeLine)) {
+        const wStart = Math.max(0, i - 2);
+        const wEnd = Math.min(lines.length - 1, i + 12);
+        if (!/\bMsUnLock\s*\(/i.test(lines.slice(wStart, wEnd + 1).join('\n'))) {
+          warnings.push(ruleTag(resolved, i + 1, 'TDS-RECLOCK', 'RecLock() without a nearby MsUnLock(); release the lock to avoid leaving records locked.'));
+        }
+      }
+      if (/\bIIf\s*\(/i.test(codeLine)) { if (!fileFlags.iif) fileFlags.iifLine = i + 1; fileFlags.iif += 1; }
+      const incCaseMatch = /^\s*#\s*(include)\s+["<]([^">]+)[">]/i.exec(codeLine);
+      if (incCaseMatch && (/[A-Z]/.test(incCaseMatch[1]) || /[A-Z]/.test(incCaseMatch[2]))) {
+        if (!fileFlags.incCase) fileFlags.incLine = i + 1;
+        fileFlags.incCase += 1;
+      }
+      if (/["'][^"']*\.ini["']/i.test(codeLine)) { if (!fileFlags.ini) fileFlags.iniLine = i + 1; fileFlags.ini += 1; }
+      if (!firstSqlLine && /\bRetSqlName\s*\(/i.test(codeLine)) firstSqlLine = i + 1;
 
       if (extension !== '.prw') continue;
 
@@ -503,6 +601,26 @@ function assertAdvplCompileRules(sourcePrograms) {
     if (includeLines.has('PROTHEUS.CH') && includeLines.has('TOTVS.CH')) {
       warnings.push(`${resolved}:${includeLines.get('TOTVS.CH')} - PROTHEUS.CH and TOTVS.CH are both included; keep only one unless a compatibility reason exists.`);
     }
+
+    // File-level rollups (deduplicated to keep output readable).
+    if (fileFlags.iif > 0) {
+      warnings.push(ruleTag(resolved, fileFlags.iifLine, 'CA4000', `Inline IIf()/IF() ternary used ${fileFlags.iif}x; prefer If/Else/EndIf blocks.`));
+    }
+    if (fileFlags.incCase > 0) {
+      warnings.push(ruleTag(resolved, fileFlags.incLine, 'CA3001', `#INCLUDE directive/filename not lowercase (${fileFlags.incCase}x); SonarQube expects lowercase (e.g. #include "totvs.ch").`));
+    }
+    if (fileFlags.ini > 0) {
+      warnings.push(ruleTag(resolved, fileFlags.iniLine, 'CA1005', `Reference to a .ini file (${fileFlags.ini}x); evaluate Cloud/SmartERP compatibility.`));
+    }
+    if (firstSqlLine > 0 && !/D_E_L_E_T_/.test(fullText)) {
+      warnings.push(ruleTag(resolved, firstSqlLine, 'TDS-DELET', 'SQL built with RetSqlName() but no D_E_L_E_T_ filter found; exclude logically deleted records.'));
+    }
+    if (firstSqlLine > 0 && !/\b(FWx|x)Filial\s*\(/i.test(fullText)) {
+      warnings.push(ruleTag(resolved, firstSqlLine, 'TDS-FILIAL', 'SQL built with RetSqlName() but no xFilial()/FWxFilial() found; scope the query to the active branch.'));
+    }
+    if (/\bTCQuery\b/i.test(fullText) && !/\bDbCloseArea\s*\(/i.test(fullText)) {
+      warnings.push(ruleTag(resolved, firstSqlLine || 1, 'TDS-TCQUERY', 'TCQuery opened but no DbCloseArea() found; close the temporary alias to free resources.'));
+    }
   }
 
   if (warnings.length > 0) {
@@ -511,6 +629,12 @@ function assertAdvplCompileRules(sourcePrograms) {
   }
 
   if (errors.length > 0) {
+    if (warnOnly) {
+      console.log('--- ADVPL RULE VALIDATION ERRORS (downgraded by --gate-warn-only) ---');
+      errors.forEach((error) => console.log(`[WARN] ${error}`));
+      console.log(`[INFO] ${errors.length} blocking rule(s) downgraded to warnings; compile is NOT aborted.`);
+      return;
+    }
     console.log('--- ADVPL RULE VALIDATION ERRORS ---');
     errors.forEach((error) => console.log(`[ERROR] ${error}`));
     throw new Error(`ADVPL rule validation failed with ${errors.length} error(s).`);
@@ -765,13 +889,89 @@ function findPython() {
   throw new Error('Python 3 not found on PATH (required for decompress-ch).');
 }
 
+function collectSourceFiles(src, recursive, exts) {
+  const stat = fs.statSync(src);
+  if (stat.isFile()) return [src];
+  const out = [];
+  const walk = (dir) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        if (recursive) walk(full);
+      } else {
+        const ext = path.extname(ent.name).slice(1).toLowerCase();
+        if (exts.length === 0 || exts.includes(ext)) out.push(full);
+      }
+    }
+  };
+  walk(src);
+  return out;
+}
+
+// Converte encoding de fontes AdvPL/TLPP. cp1252 (padrao) delega ao convert_encoding.{sh,bat}
+// (pula ASCII/cp1252, remove BOM, preserva CRLF e permissoes). utf8 faz o reverso via iconv inline.
+function runConvertEncoding(options) {
+  const src = options.origin;
+  if (!src) throw new Error('Source is required for convert-encoding (use --source).');
+  if (!fs.existsSync(src)) throw new Error(`Source not found: ${src}`);
+  const to = String(options.to || 'cp1252').toLowerCase().replace('-', '');
+  if (!['cp1252', 'utf8'].includes(to)) {
+    throw new Error(`--to must be cp1252 or utf8 (got "${options.to}").`);
+  }
+
+  if (to === 'cp1252') {
+    const dir = scriptDir();
+    const script = isWindows()
+      ? path.join(dir, 'convert_encoding.bat')
+      : path.join(dir, 'convert_encoding.sh');
+    if (!pathExists(script)) throw new Error(`Encoding script not found: ${script}`);
+    const args = [];
+    if (options.recursive) args.push('-r');
+    if (options.dryRun) args.push('--dry-run');
+    if (options.extensions) args.push('-e', options.extensions);
+    args.push(src);
+    const runner = isWindows() ? script : 'bash';
+    const spawnArgs = isWindows() ? args : [script, ...args];
+    const result = childProcess.spawnSync(runner, spawnArgs, { stdio: 'inherit' });
+    process.exit(result.status === null ? 1 : result.status);
+  }
+
+  // to === 'utf8' : WINDOWS-1252 -> UTF-8 (iconv preserva CRLF), inline.
+  const exts = (options.extensions || 'prw prg tlpp prx ch th')
+    .split(/[\s,;]+/).filter(Boolean).map((e) => e.toLowerCase().replace(/^\./, ''));
+  const files = collectSourceFiles(src, options.recursive, exts);
+  let converted = 0; let skipped = 0; let failed = 0;
+  for (const f of files) {
+    const buf = fs.readFileSync(f);
+    if (!buf.some((b) => b > 127)) { skipped += 1; continue; } // ASCII puro
+    const isUtf8 = childProcess.spawnSync('iconv', ['-f', 'UTF-8', '-t', 'UTF-8', f], { stdio: 'ignore' });
+    if (isUtf8.status === 0) { skipped += 1; continue; } // ja e UTF-8 valido
+    if (options.dryRun) { console.log(`[DRY] cp1252 -> utf8: ${f}`); converted += 1; continue; }
+    const out = childProcess.spawnSync('iconv', ['-f', 'WINDOWS-1252', '-t', 'UTF-8', f]);
+    if (out.status !== 0 || !out.stdout || out.stdout.length === 0) {
+      console.error(`[ERROR] iconv failed: ${f}`); failed += 1; continue;
+    }
+    fs.writeFileSync(f, out.stdout); console.log(`[OK] cp1252 -> utf8: ${f}`); converted += 1;
+  }
+  console.log(`[INFO] convert-encoding (utf8): converted=${converted} skipped=${skipped} failed=${failed}`);
+  process.exit(failed > 0 ? 1 : 0);
+}
+
 function runAppre(options, advpls) {
   if (options.programs.length === 0) throw new Error('Programs is required for appre.');
-  const args = ['appre'];
-  for (const includePath of options.includes) args.push('-I', includePath);
-  args.push(joinValues(options.programs));
-  const result = childProcess.spawnSync(advpls, args, { stdio: 'inherit' });
-  process.exit(result.status === null ? 1 : result.status);
+  // Compila a partir de um staging temporario para nao gerar .ppx*/.ppo ao lado do fonte.
+  const staging = compileStaging(options.programs);
+  let exitCode = 1;
+  try {
+    const args = ['appre'];
+    for (const includePath of options.includes) args.push('-I', includePath);
+    args.push(joinValues(staging.programs));
+    const result = childProcess.spawnSync(advpls, args, { stdio: 'inherit' });
+    exitCode = result.status === null ? 1 : result.status;
+  } finally {
+    fs.rmSync(staging.root, { recursive: true, force: true });
+  }
+  process.exit(exitCode);
 }
 
 function main() {
@@ -786,13 +986,18 @@ function main() {
 
   if (options.action === 'quality') {
     if (options.programs.length === 0) throw new Error('Programs is required for quality.');
-    assertAdvplCompileRules(options.programs);
+    assertAdvplCompileRules(options.programs, { warnOnly: options.gateWarnOnly });
     console.log('[INFO] Quality gate passed.');
     return;
   }
 
   if (options.action === 'decompress-ch') {
     runDecompressCh(options);
+    return;
+  }
+
+  if (options.action === 'convert-encoding') {
+    runConvertEncoding(options);
     return;
   }
 
@@ -809,7 +1014,7 @@ function main() {
     if (options.action === 'appre') runAppre(options, advpls);
 
     if (options.action === 'compile') {
-      assertAdvplCompileRules(options.programs);
+      assertAdvplCompileRules(options.programs, { warnOnly: options.gateWarnOnly });
       staging = compileStaging(options.programs);
       effectivePrograms = staging.programs;
       const stagedDirs = [...new Set(effectivePrograms.map((program) => path.dirname(program)))];
