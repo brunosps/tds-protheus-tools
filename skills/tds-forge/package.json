@@ -1,8 +1,8 @@
 {
-  "name": "tds-protheus-tools-skill",
-  "version": "1.0.0",
+  "name": "tds-forge-skill",
+  "version": "2.0.0",
   "private": true,
-  "description": "Codex skill for TOTVS Protheus quality gate, TDS-Cli compile, patch, and RPO inspection workflows.",
+  "description": "tds-forge: executable skill for TOTVS Protheus quality gate, TDS-Cli compile, patch, RPO inspection, encoding conversion, and appre workflows.",
   "repository": {
     "type": "git",
     "url": "https://github.com/brunosps/tds-protheus-tools.git"

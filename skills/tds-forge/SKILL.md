@@ -1,11 +1,11 @@
 ---
-name: tds-protheus-tools
-description: Compile Protheus AdvPL/TLPP sources, run a Protheus 12.1.2510 quality gate, generate PTM patches, inspect patch contents, and query RPO contents on Windows or Linux using TOTVS TDS-Cli/advpls and the TDS Language Server. Use when Codex needs to validate Protheus tenant-context safety, compile fontes, create a patch, validate TDS connectivity, run local appre precompile, inspect .ptm/.upd/.pak contents, verify resources/functions in an RPO, or prepare this skill for GitHub installation through npx skills. Use the default LOCALHOST/DEV/admin session unless the user asks to change it or connection/authentication fails.
+name: tds-forge
+description: Executable toolchain for TOTVS Protheus AdvPL/TLPP on Windows or Linux via TDS-Cli (advpls) and the TDS Language Server. Compiles fontes, runs a Protheus 12.1.2510 quality gate (tenant-context safety plus a SonarQube rule subset — security blocks, legacy/quality warns; --gate-warn-only downgrades), generates and inspects PTM/.upd/.pak patches, queries the RPO (resources/functions), runs local appre precompile, validates TDS connectivity, decompresses .ch/.th includes, and converts source encoding (UTF-8 <-> CP1252, preserving CRLF). Use when the user needs to validate, compile, patch, inspect the RPO, fix source encoding, or prepare this skill for npx skills install. Use the default LOCALHOST/DEV/admin session unless the user asks to change it or connection/authentication fails.
 ---
 
-# TDS Protheus Tools
+# TDS Forge
 
-Use this skill for Protheus quality validation, build, patch, and RPO inspection work through TOTVS TDS-Cli (`advpls`) and the TDS Language Server.
+Use this skill for Protheus quality validation, build, patch, RPO inspection, and source-encoding conversion through TOTVS TDS-Cli (`advpls`) and the TDS Language Server. It is the executable core of the `tds-*` collection; the sibling skills (`tds-codex`, `tds-scaffold`, `tds-restkit`, `tds-sqlkit`, `tds-modernizer`, `tds-testkit`) provide the knowledge and generators it operates on.
 
 ## Non-Negotiables
 
@@ -27,6 +27,7 @@ Use this skill for Protheus quality validation, build, patch, and RPO inspection
 - `npm` available if the skill must auto-install `@totvs/tds-ls` or `vscode-jsonrpc`.
 - `advpls` for compile, patch, appre, and RPO actions. The `quality` action does not require `advpls`, AppServer, credentials, or network access.
 - `python3` (or `python`) for the `decompress-ch` action; it does not require `advpls`, AppServer, credentials, or network access.
+- `iconv` for the `convert-encoding` action (pre-installed on Linux/macOS; via Git Bash on Windows); it does not require `advpls`, AppServer, credentials, or network access.
 - On Linux, set `TDS_INCLUDES` or pass `--includes` when includes are not in `/opt/totvs/includes`.
 
 The CLI resolves `advpls` in this order:
@@ -107,6 +108,19 @@ node .codex/skills/tds-protheus-tools/scripts/tds_protheus.mjs \
   --dest /opt/totvs/includes
 ```
 
+Convert source encoding between UTF-8 and CP1252 (Windows-1252). Skips pure-ASCII and already-target files, strips the UTF-8 BOM, preserves CRLF line endings and file permissions. Uses `iconv`; `--to cp1252` (default) delegates to `convert_encoding.{sh,bat}`, `--to utf8` runs the reverse inline:
+
+```bash
+node .codex/skills/tds-protheus-tools/scripts/tds_protheus.mjs \
+  --action convert-encoding \
+  --source ./src \
+  --to cp1252 \
+  --recursive \
+  --dry-run
+```
+
+Options: `--source <file|dir>` (required), `--to cp1252|utf8` (default `cp1252`), `--recursive`, `--dry-run`, `--extensions "prw prg tlpp prx ch th"` (default). Requires `iconv`; no `advpls`, AppServer, credentials, or network access. Use this instead of editing cp1252 sources with text tools, which corrupt accented characters.
+
 Windows compatibility form:
 
 ```powershell
@@ -152,6 +166,43 @@ Non-blocking `.prw` warnings:
 - String comparison with single `=` inside conditions.
 - JSON indexed property access in conditions without `HasProperty()`.
 
+### SonarQube rule catalog (engpro.totvs)
+
+The gate also evaluates the AdvPL/TLPP SonarQube catalog (see `references/sonarqube-rules-reference.md`). Each finding is tagged with its rule id, e.g. `[CA2050]`. **Security (G1) blocks; legacy/quality (G2/G3/G4) warns.** These rules apply to both `.prw` and `.tlpp`.
+
+Blocking (security, `[id]`):
+
+- `[CA2022]` `StaticCall()` — use `FWLoadModel()`/`FWLoadMenuDef()` or a direct namespace call.
+- `[CA2023]` `PTInternal()` — prohibited.
+- `[CA2052]` Hardcoded credential (var named `*senha*/*pass*/*pwd*/*secret*/*token*/*apikey*` assigned a string literal) — read from `GetMV()`/AppServer config.
+- `[CA2053]` `CREATE PROCEDURE` in source — use SPManager.
+- `[CA2050]` SQL injection: a **bare variable** concatenated into a SQL value (`= '" + cVar + "'`). Framework calls (`xFilial()`, `RetSqlName()`, `FWxFilial()`, …) are excluded. Use `FWExecStatement()` with bind parameters.
+- `[BG1000]` `RpcSetEnv()`/`RpcSetType()` inside a REST/SOAP source (detected via `@Get/@Post/...`, `WSRESTFUL`, `WSMETHOD`, `WSSERVICE`) — configure `PrepareIn`.
+
+Warning (legacy/quality, `[id]`):
+
+- `[CA1004]` `ConOut()`/`OutErr()`/`?` console output — use `FWLogMsg()`.
+- `[CA1000]` ISAM `MSCREATE`/`DBCREATE`/`CRIATRAB` — use `FWTemporaryTable`.
+- `[CA1003]` `GetMV`/`SuperGetMV`/`ExistBlock`/`AllUsers`/`Pergunte`/`Type` inside a loop — cache before the loop.
+- `[CA2000–CA2012]` direct `DbSelectArea`/`DbUseArea` on system tables (`SM0`, `SIX`, `SX1`–`SXG`, …) — use the framework API.
+- `[CA4000]` inline `IIf()`/`IF()` ternary — prefer `If/Else/EndIf` (rolled up once per file).
+- `[CA3001]` `#INCLUDE`/filename not lowercase (rolled up once per file).
+- `[CA1005]` `.ini` file reference (rolled up once per file).
+- `[TDS-DELET]` SQL with `RetSqlName()` but no `D_E_L_E_T_` filter.
+- `[TDS-FILIAL]` SQL with `RetSqlName()` but no `xFilial()`/`FWxFilial()`.
+- `[TDS-TCQUERY]` `TCQuery` opened without `DbCloseArea()`.
+- `[TDS-RECLOCK]` `RecLock()` without a nearby `MsUnLock()`.
+
+### Bypassing blocking rules for legacy compiles
+
+`--gate-warn-only` downgrades **all** blocking rules (including the legacy tenant-context and name-length checks) to warnings, so the gate prints findings but does not abort. Use it to compile legacy sources that intentionally violate a security/style rule:
+
+```bash
+node scripts/tds_protheus.mjs --action compile --programs ./src/Legacy.prw --gate-warn-only --recompile
+```
+
+Standard TOTVS sources whose function names exceed the length limits (e.g. `nfsexmlenv.prw`) fail the legacy name-length rules regardless of the SonarQube catalog; compile them with `--gate-warn-only` or via `advpls` directly.
+
 ## GitHub / npx skills Distribution
 
 Canonical repository:
@@ -163,16 +214,19 @@ https://github.com/brunosps/tds-protheus-tools
 Publish the skill folder as a GitHub repository with this root structure:
 
 ```text
-tds-protheus-tools/
-  SKILL.md
-  agents/openai.yaml
-  package.json
-  .gitignore
-  references/tds-cli-notes.md
-  scripts/tds_protheus.mjs
-  scripts/tds_lsp_client.js
-  scripts/tds_protheus.ps1
-  scripts/decompress_ch.py
+tds-protheus-tools/                  # collection repository
+  skills/tds-forge/                  # this skill (executable toolchain)
+    SKILL.md
+    agents/openai.yaml
+    package.json
+    references/tds-cli-notes.md
+    scripts/tds_protheus.mjs
+    scripts/tds_lsp_client.js
+    scripts/tds_protheus.ps1
+    scripts/decompress_ch.py
+    scripts/convert_encoding.sh
+    scripts/convert_encoding.bat
+  skills/tds-codex/ ...              # sibling knowledge/generation skills
 ```
 
 Install from GitHub with:
